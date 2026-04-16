@@ -1,0 +1,3 @@
+Why the URL Doesn't Appear in the Console
+The email from Lookout Support (Fabio Silva) explains it directly: on iOS, smishing URL detection is operated by the OS itself, not by the Lookout app �. Lookout only provides the classification logic — Apple's iOS controls the actual URL interception pipeline. Because the URL check happens at the OS level, Lookout has no device attribution for that event, meaning it cannot associate the flagged URL back to a specific device or user to surface in the console �.
+This is a fundamental iOS sandboxing constraint — Apple does not allow third-party apps to read or log the full URL context from SMS/Messages at the system level.
