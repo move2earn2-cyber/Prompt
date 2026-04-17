@@ -1,0 +1,497 @@
+# falcon_ui.py
+# pip install streamlit pandas fpdf2
+# Run: streamlit run falcon_ui.py
+
+import streamlit as st
+import pandas as pd
+import json, io
+from datetime import datetime
+from fpdf import FPDF
+from falcon_check import run_all, get_clusters
+
+st.set_page_config(
+    page_title="Falcon Cluster Health",
+    layout="wide", page_icon="🦅",
+    initial_sidebar_state="expanded"
+)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 🦅 Falcon Health Checker")
+    st.markdown("---")
+
+    components = st.multiselect(
+        "Component", ["kac", "edr"], default=["kac", "edr"])
+
+    checks = st.multiselect(
+        "Checks to run",
+        ["all","namespace","helm","pods","daemonset","deployment",
+         "node_coverage","node_taints","webhook","events",
+         "version_drift","helmrelease","kustomization","git_repo","helm_repo"],
+        default=["all"]
+    )
+
+    env_filters = st.multiselect(
+        "Environment", ["eng","nonp","prod"],
+        default=[], placeholder="All environments")
+
+    region_filter = st.text_input("Region filter", placeholder="e.g. canadaeast")
+
+    st.markdown("---")
+    try:
+        all_clusters  = get_clusters()
+        cluster_names = sorted([c["name"] for c in all_clusters])
+    except Exception:
+        cluster_names = []
+    selected_clusters = st.multiselect("Specific clusters (optional)", cluster_names)
+
+    st.markdown("---")
+    run_btn = st.button("🔍 Run Health Check", type="primary", use_container_width=True)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def color_cell(val):
+    if isinstance(val, str):
+        if "✅" in val or "Healthy" in val:
+            return "background-color:#d1fae5;color:#065f46"
+        if "❌" in val or "Issues" in val:
+            return "background-color:#fee2e2;color:#991b1b"
+        if "⚠️" in val or "STALE" in val or "Drift" in val:
+            return "background-color:#fef9c3;color:#713f12"
+    return ""
+
+def flatten_for_table(results):
+    rows = []
+    for r in results:
+        helm_info = r.get("helm", {})
+        helm_str  = " | ".join(
+            f"{k}: {v.get('status','?')} chart={v.get('chart_version','?')} "
+            f"app={v.get('app_version','?')} {v.get('deploy_age','')}"
+            for k, v in helm_info.items()
+        ) if isinstance(helm_info, dict) else ""
+
+        pods           = r.get("pods", [])
+        pod_summary    = f"{sum(1 for p in pods if '✅' in p.get('status',''))}/{len(pods)} ready"
+        pod_versions   = "; ".join(sorted({
+            img.split(":")[-1] for p in pods for img in p.get("images",[])
+        }))
+        total_restarts = sum(p.get("restarts",0) for p in pods)
+        total_oom      = sum(p.get("oom_killed",0) for p in pods)
+
+        ds   = r.get("daemonset") or {}
+        cov  = r.get("node_coverage") or {}
+        dep  = r.get("deployment") or {}
+        tnt  = r.get("node_taints") or {}
+
+        hr_statuses = " | ".join(
+            f"{k}: {v.get('status','?')} recn={v.get('reconcile_age','?')}"
+            for k, v in (r.get("helmrelease") or {}).items()
+        )
+        ks_statuses = " | ".join(
+            f"{k}: {v.get('status','?')} recn={v.get('reconcile_age','?')}"
+            for k, v in (r.get("kustomization") or {}).items()
+        )
+        git_status = " | ".join(
+            f"{g.get('name','?')}: {g.get('status','?')} fetched={g.get('fetch_age','?')}"
+            for g in (r.get("git_repo") or [])
+        )
+        helmrepo_status = " | ".join(
+            f"{g.get('name','?')}: {g.get('status','?')} synced={g.get('sync_age','?')}"
+            for g in (r.get("helm_repo") or [])
+        )
+        drift_summary = " | ".join(
+            f"{k}: {v.get('status','?')}"
+            for k, v in (r.get("version_drift") or {}).items()
+        )
+
+        rows.append({
+            "Cluster":         r["cluster"],
+            "Env":             r["env"],
+            "Region":          r["location"],
+            "K8s Ver":         r.get("k8s_version","?"),
+            "Overall":         r.get("overall",""),
+            "Namespace":       r.get("namespace",""),
+            "Helm":            helm_str,
+            "Pods":            pod_summary,
+            "Sensor Ver":      pod_versions,
+            "Restarts":        total_restarts,
+            "OOMKilled":       total_oom,
+            "DaemonSet":       ds.get("status",""),
+            "Deployment":      dep.get("status",""),
+            "Node Coverage":   cov.get("status",""),
+            "Node Taints":     tnt.get("status",""),
+            "Webhook":         r.get("webhook",""),
+            "Version Drift":   drift_summary,
+            "HelmRelease":     hr_statuses,
+            "Kustomization":   ks_statuses,
+            "GitRepo":         git_status,
+            "HelmRepo Source": helmrepo_status,
+            "Checked At":      r.get("checked_at",""),
+        })
+    return pd.DataFrame(rows)
+
+def generate_pdf(results, df):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 10, "CrowdStrike Falcon - Multi-Cluster Health Report", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+    healthy = sum(1 for r in results if "✅" in r.get("overall",""))
+    pdf.cell(0, 6,
+             f"Clusters: {len(results)}  |  Healthy: {healthy}  |  "
+             f"Issues: {len(results)-healthy}", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica","B",12)
+    pdf.cell(0,8,"Executive Summary",ln=True)
+    cols   = ["Cluster","Env","Region","Overall","Namespace",
+              "Pods","Node Coverage","Webhook","HelmRelease"]
+    widths = [35,12,25,25,20,14,25,22,22]
+    pdf.set_font("Helvetica","B",7)
+    for col,w in zip(cols,widths):
+        pdf.cell(w,6,col,border=1)
+    pdf.ln()
+    pdf.set_font("Helvetica","",7)
+    for _,row in df[cols].iterrows():
+        for col,w in zip(cols,widths):
+            val = str(row[col]).replace("✅","OK").replace("❌","FAIL").replace("⚠️","WARN")
+            pdf.cell(w,6,val[:26],border=1)
+        pdf.ln()
+    pdf.ln(6)
+
+    for r in results:
+        pdf.set_font("Helvetica","B",12)
+        ok = "OK" if "✅" in r.get("overall","") else "ISSUES"
+        pdf.cell(0,8,
+            f"[{ok}] {r['cluster']}  |  {r['env'].upper()}  |  "
+            f"{r['location']}  |  k8s {r.get('k8s_version','?')}",ln=True)
+        pdf.set_font("Helvetica","",9)
+
+        for section in ["namespace","webhook","daemonset","deployment",
+                        "node_coverage","node_taints"]:
+            val = r.get(section)
+            if val is None: continue
+            display = json.dumps(val) if isinstance(val,dict) else str(val)
+            display = display.replace("✅","OK").replace("❌","FAIL").replace("⚠️","WARN")
+            pdf.multi_cell(0,5,f"  {section.upper()}: {display[:200]}")
+
+        for release, info in (r.get("helm") or {}).items():
+            line = (f"  HELM [{release}]: {info.get('status','')} | "
+                    f"chart={info.get('chart_version','?')} | "
+                    f"app={info.get('app_version','?')} | "
+                    f"deployed={info.get('last_deployed','?')} | "
+                    f"age={info.get('deploy_age','?')}"
+                    ).replace("✅","OK").replace("❌","FAIL").replace("⚠️","WARN")
+            pdf.multi_cell(0,5,line)
+
+        pdf.set_font("Helvetica","B",9)
+        pdf.cell(0,5,"  PODS:",ln=True)
+        pdf.set_font("Helvetica","",8)
+        for pod in r.get("pods",[]):
+            status = pod["status"].replace("✅","OK").replace("❌","FAIL")
+            oom    = f" OOM={pod['oom_killed']}" if pod.get("oom_killed") else ""
+            pdf.multi_cell(0,4,
+                f"    {pod['name']} | {status} | age={pod['age']} "
+                f"| restarts={pod['restarts']}{oom} | node={pod['node']}")
+            pdf.multi_cell(0,4,
+                f"      image: {', '.join(pod.get('images',[]))[:100]}")
+
+        pdf.set_font("Helvetica","B",9)
+        pdf.cell(0,5,"  VERSION DRIFT:",ln=True)
+        pdf.set_font("Helvetica","",8)
+        for k,v in (r.get("version_drift") or {}).items():
+            line = (f"    {k}: {v.get('status','')} | "
+                    f"running={v.get('running',v.get('deployed','?'))} | "
+                    f"expected={v.get('expected','?')}"
+                    ).replace("✅","OK").replace("⚠️","WARN")
+            pdf.multi_cell(0,4,line)
+
+        pdf.set_font("Helvetica","B",9)
+        pdf.cell(0,5,"  FLUXCD:",ln=True)
+        pdf.set_font("Helvetica","",8)
+        for release,info in (r.get("helmrelease") or {}).items():
+            line = (f"    HelmRelease [{release}]: {info.get('status','')} | "
+                    f"rev={info.get('last_applied_rev','?')} | "
+                    f"reconciled={info.get('reconcile_age','?')} | "
+                    f"suspended={info.get('suspended',False)}"
+                    ).replace("✅","OK").replace("❌","FAIL")
+            pdf.multi_cell(0,4,line)
+        for name,info in (r.get("kustomization") or {}).items():
+            line = (f"    Kustomization [{name}]: {info.get('status','')} | "
+                    f"rev={info.get('last_applied_rev','?')} | "
+                    f"reconciled={info.get('reconcile_age','?')}"
+                    ).replace("✅","OK").replace("❌","FAIL")
+            pdf.multi_cell(0,4,line)
+        for g in (r.get("git_repo") or []):
+            line = (f"    GitRepo [{g.get('name','?')}]: {g.get('status','')} | "
+                    f"rev={g.get('revision','?')} | "
+                    f"fetched={g.get('fetch_age','?')}"
+                    ).replace("✅","OK").replace("❌","FAIL")
+            pdf.multi_cell(0,4,line)
+        for g in (r.get("helm_repo") or []):
+            line = (f"    HelmRepo [{g.get('name','?')}]: {g.get('status','')} | "
+                    f"synced={g.get('sync_age','?')}"
+                    ).replace("✅","OK").replace("❌","FAIL")
+            pdf.multi_cell(0,4,line)
+
+        events = r.get("events",[])
+        if any(e.get("reason","-") != "-" for e in events):
+            pdf.set_font("Helvetica","B",9)
+            pdf.cell(0,5,"  EVENTS:",ln=True)
+            pdf.set_font("Helvetica","",8)
+            for e in events:
+                if e.get("reason","-") != "-":
+                    pdf.multi_cell(0,4,
+                        f"    [{e['reason']}] {e['message'][:120]} (x{e['count']})")
+        pdf.ln(4)
+
+    buf = io.BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
+
+# ── Main UI ───────────────────────────────────────────────────────────────────
+
+st.title("🦅 CrowdStrike Falcon — Multi-Cluster Health Dashboard")
+
+if run_btn:
+    comp        = "both" if len(components) != 1 else components[0]
+    envs_to_run = env_filters if env_filters else [None]
+    with st.spinner("⏳ Querying clusters in parallel..."):
+        all_results, seen = [], set()
+        for env in envs_to_run:
+            for r in run_all(
+                component=comp,
+                checks=checks or ["all"],
+                env=env,
+                region=region_filter or None,
+                clusters=selected_clusters or None,
+            ):
+                if r["cluster"] not in seen:
+                    seen.add(r["cluster"])
+                    all_results.append(r)
+    st.session_state["results"] = all_results
+
+results = st.session_state.get("results", [])
+
+if results:
+    healthy        = sum(1 for r in results if "✅" in r.get("overall",""))
+    issues         = len(results) - healthy
+    total_pods     = sum(len(r.get("pods",[])) for r in results)
+    total_restarts = sum(sum(p.get("restarts",0) for p in r.get("pods",[])) for r in results)
+    total_oom      = sum(sum(p.get("oom_killed",0) for p in r.get("pods",[])) for r in results)
+    flux_issues    = sum(
+        1 for r in results
+        for v in (r.get("helmrelease") or {}).values()
+        if "❌" in v.get("status","")
+    )
+
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    c1.metric("Clusters",       len(results))
+    c2.metric("✅ Healthy",     healthy)
+    c3.metric("❌ Issues",      issues,
+              delta=f"-{issues}" if issues else None, delta_color="inverse")
+    c4.metric("Total Restarts", total_restarts, delta_color="inverse")
+    c5.metric("OOMKilled",      total_oom, delta_color="inverse")
+    c6.metric("⚡ Flux Issues", flux_issues, delta_color="inverse")
+
+    st.markdown("---")
+    st.subheader("📊 Summary Table")
+    df = flatten_for_table(results)
+    st.dataframe(df.style.applymap(color_cell), use_container_width=True, height=280)
+
+    st.markdown("**Export Results:**")
+    c_csv, c_pdf, c_json = st.columns(3)
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    with c_csv:
+        st.download_button("📥 CSV", df.to_csv(index=False).encode(),
+            f"falcon-{ts}.csv","text/csv",use_container_width=True)
+    with c_pdf:
+        st.download_button("📄 PDF", generate_pdf(results, df),
+            f"falcon-{ts}.pdf","application/pdf",use_container_width=True)
+    with c_json:
+        st.download_button("📦 JSON",
+            json.dumps(results,indent=2,default=str).encode(),
+            f"falcon-{ts}.json","application/json",use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("🔍 Cluster Detail")
+    for r in results:
+        icon  = "🟢" if "✅" in r.get("overall","") else "🔴"
+        label = (f"{icon} {r['cluster']}  |  {r['env'].upper()}  |  "
+                 f"{r['location']}  |  k8s {r.get('k8s_version','?')}")
+        with st.expander(label, expanded=False):
+            tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs([
+                "🪖 Helm","🫛 Pods","📡 Coverage",
+                "🔗 Webhook","⚡ FluxCD","📦 Version Drift","⚠️ Events"
+            ])
+
+            with tab1:
+                for release, info in (r.get("helm") or {}).items():
+                    st.markdown(f"**{release}**")
+                    a,b,c,d,e = st.columns(5)
+                    a.metric("Status",        info.get("status","?"))
+                    b.metric("Chart Ver",     info.get("chart_version","?"))
+                    c.metric("App Ver",       info.get("app_version","?"))
+                    d.metric("Last Deployed", info.get("last_deployed","?")[:10])
+                    stale_icon = "⚠️ STALE" if info.get("stale") else "✅ Fresh"
+                    e.metric("Deploy Age",    info.get("deploy_age","?"), delta=stale_icon,
+                             delta_color="inverse" if info.get("stale") else "normal")
+
+            with tab2:
+                pods = r.get("pods",[])
+                if pods:
+                    pod_df = pd.DataFrame([{
+                        "Pod":      p["name"],
+                        "Status":   p["status"],
+                        "Ready":    "✅" if p["ready"] else "❌",
+                        "Restarts": p["restarts"],
+                        "OOMKilled":p["oom_killed"],
+                        "Age":      p["age"],
+                        "Node":     p["node"],
+                        "Image":    "; ".join(p.get("images",[])),
+                    } for p in pods])
+                    st.dataframe(pod_df.style.applymap(color_cell), use_container_width=True)
+                    res_rows = []
+                    for p in pods:
+                        for rc in p.get("resources",[]):
+                            res_rows.append({"Pod": p["name"], **rc})
+                    if res_rows:
+                        st.markdown("**Resource Requests & Limits**")
+                        st.dataframe(pd.DataFrame(res_rows), use_container_width=True)
+                    oom_pods = [p for p in pods if p.get("oom_killed",0) > 0]
+                    if oom_pods:
+                        st.error(f"⚠️ OOMKilled detected in: "
+                                 f"{', '.join(p['name'] for p in oom_pods)}")
+                else:
+                    st.warning("No pods found")
+
+            with tab3:
+                ds  = r.get("daemonset")
+                cov = r.get("node_coverage")
+                dep = r.get("deployment")
+                tnt = r.get("node_taints")
+                if ds:
+                    st.markdown(f"**EDR DaemonSet:** `{ds.get('status','')}`")
+                    st.json({k:v for k,v in ds.items() if k!="status"})
+                if cov:
+                    st.markdown(f"**Node Coverage:** `{cov.get('status','')}`")
+                    m1,m2,m3 = st.columns(3)
+                    m1.metric("Total Nodes", cov.get("total_nodes",0))
+                    m2.metric("Covered",     cov.get("covered",0))
+                    m3.metric("Uncovered",   cov.get("uncovered",0))
+                    if cov.get("uncovered_nodes"):
+                        st.error(f"Uncovered: {', '.join(cov['uncovered_nodes'])}")
+                if tnt:
+                    st.markdown(f"**Node Taints:** `{tnt.get('status','')}`")
+                    if tnt.get("nodes_with_taints"):
+                        st.dataframe(
+                            pd.DataFrame(tnt["nodes_with_taints"]),
+                            use_container_width=True)
+                if dep:
+                    st.markdown(f"**KAC Deployment:** `{dep.get('status','')}`")
+
+            with tab4:
+                col_ns, col_wh = st.columns(2)
+                ns_val = r.get("namespace","")
+                wh_val = r.get("webhook","")
+                col_ns.metric("Namespace",
+                    "✅ Exists" if "✅" in ns_val else "❌ Missing")
+                col_wh.metric("Webhook",
+                    "✅ Registered" if "✅" in str(wh_val) else "❌ Not Found")
+
+            with tab5:
+                st.markdown("**HelmRelease (FluxCD)**")
+                hr_rows = []
+                for name, info in (r.get("helmrelease") or {}).items():
+                    hr_rows.append({
+                        "Release":        name,
+                        "Status":         info.get("status",""),
+                        "Applied Rev":    info.get("last_applied_rev","?"),
+                        "Attempted Rev":  info.get("last_attempted_rev","?"),
+                        "Last Reconcile": info.get("last_reconcile","?"),
+                        "Reconcile Age":  info.get("reconcile_age","?"),
+                        "Suspended":      "⚠️ YES" if info.get("suspended") else "✅ No",
+                        "Message":        info.get("message",""),
+                    })
+                if hr_rows:
+                    st.dataframe(
+                        pd.DataFrame(hr_rows).style.applymap(color_cell),
+                        use_container_width=True)
+
+                st.markdown("**Kustomization (FluxCD)**")
+                ks_rows = []
+                for name, info in (r.get("kustomization") or {}).items():
+                    ks_rows.append({
+                        "Name":           name,
+                        "Status":         info.get("status",""),
+                        "Applied Rev":    info.get("last_applied_rev","?"),
+                        "Last Reconcile": info.get("last_reconcile","?"),
+                        "Reconcile Age":  info.get("reconcile_age","?"),
+                        "Suspended":      "⚠️ YES" if info.get("suspended") else "✅ No",
+                        "Message":        info.get("message",""),
+                    })
+                if ks_rows:
+                    st.dataframe(
+                        pd.DataFrame(ks_rows).style.applymap(color_cell),
+                        use_container_width=True)
+
+                st.markdown("**GitRepository Sources**")
+                git_rows = r.get("git_repo",[])
+                if git_rows:
+                    st.dataframe(
+                        pd.DataFrame(git_rows).style.applymap(color_cell),
+                        use_container_width=True)
+
+                st.markdown("**HelmRepository Sources**")
+                helmrepo_rows = r.get("helm_repo",[])
+                if helmrepo_rows:
+                    st.dataframe(
+                        pd.DataFrame(helmrepo_rows).style.applymap(color_cell),
+                        use_container_width=True)
+
+            with tab6:
+                drift = r.get("version_drift",{})
+                if drift:
+                    drift_rows = []
+                    for k,v in drift.items():
+                        drift_rows.append({
+                            "Check":    k,
+                            "Status":   v.get("status",""),
+                            "Running":  str(v.get("running", v.get("deployed","?"))),
+                            "Expected": v.get("expected","?"),
+                        })
+                    st.dataframe(
+                        pd.DataFrame(drift_rows).style.applymap(color_cell),
+                        use_container_width=True)
+
+            with tab7:
+                events = r.get("events",[])
+                ev_df  = pd.DataFrame(events)
+                if not ev_df.empty:
+                    st.dataframe(
+                        ev_df.style.applymap(color_cell),
+                        use_container_width=True)
+
+else:
+    st.info("👈 Configure filters in the sidebar and click **Run Health Check**.")
+    st.markdown("""
+    **Checks available:**
+    - ✅ Namespace existence
+    - ✅ Helm release status, chart version, app version, last deployed, stale flag (>24h)
+    - ✅ Pod readiness, sensor image version, restart count, OOMKilled history, age, node
+    - ✅ Resource requests & limits per container
+    - ✅ EDR DaemonSet desired vs ready node count
+    - ✅ KAC Deployment replica health
+    - ✅ Node-level sensor coverage gaps
+    - ✅ Node taint check (NoSchedule / NoExecute)
+    - ✅ MutatingWebhookConfiguration registration
+    - ✅ Warning events from `falcon-system`
+    - ✅ Sensor version drift vs expected
+    - ✅ Helm chart version drift vs expected
+    - ✅ FluxCD HelmRelease reconcile status & suspend flag
+    - ✅ FluxCD Kustomization reconcile status & suspend flag
+    - ✅ FluxCD GitRepository source health & last fetch
+    - ✅ FluxCD HelmRepository source health & last sync
+    """)
