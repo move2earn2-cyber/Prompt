@@ -1,0 +1,62 @@
+Use case
+Use case name: Axios exploit impact assessment
+Purpose:
+Determine how many CrowdStrike detections and blocks/preventions were observed for the Axios exploit, which hosts were involved, and whether those hosts still have related security exposure.
+When to use it:
+A new external threat report is published.
+Security leadership asks whether your environment was affected.
+You need a fast impact summary for a named exploit or campaign.
+You want to validate whether protection controls only detected the activity or actively stopped it.
+Primary value:
+This use case turns external threat intelligence into an internal impact summary by correlating threat context with detection outcomes and affected assets. Because Falcon MCP exposes detections, host information, behaviors, and vulnerability context in one workflow, it is well suited for this type of cross-source assessment. ��
+User prompt
+Use a prompt like this:
+Assess CrowdStrike impact for the Axios exploit.
+
+Scope this as the Axios npm supply-chain compromise.
+Use the following pivots:
+- axios
+- ZshBucket
+- STARDUST CHOLLIMA
+
+Tasks:
+1. Search for related threat indicators and threat labels.
+2. Search for matching detections in my environment for the selected time window.
+3. Count total detections.
+4. Retrieve detection details and classify each as blocked/prevented or detected-only.
+5. Search for related behavior activity on the same hosts.
+6. Retrieve host details for all matched hosts.
+7. Optionally check whether matched hosts still have related open vulnerabilities.
+8. Return a report with total detections, total blocks/preventions, host count, affected hosts, and remaining exposure.
+Recommended inputs:
+Threat name or campaign name.
+IOC pivots, if available.
+Time window, for example from the public disclosure date onward.
+Optional CVE list if you want residual exposure validation.
+Expected result
+The expected output is a concise impact report that answers:
+How many Axios-related detections were found.
+How many were blocked or prevented.
+How many were detection-only events.
+Which hosts were involved.
+Whether the same hosts showed related behavior activity.
+Whether any impacted hosts still have unresolved exposure.
+A good result should look like this:
+Impact Assessment Report: Axios Exploit
+
+- Threat scope: Axios npm supply-chain compromise
+- Time window: 2026-03-31 to present
+- Total detections: 8
+- Total blocked/prevented: 5
+- Detection-only events: 3
+- Affected hosts: 4
+- Hostnames: host-a, host-b, host-c, host-d
+- Repeated activity: Yes, 1 host had multiple related events
+- Remaining exposure: 2 affected hosts still have open related vulnerabilities
+- Analyst note: The threat was observed internally, but most activity was prevented before execution completed
+Success criteria:
+The report ties all findings to one clearly defined threat scope.
+Detection counts and prevention counts are separated.
+Every affected host is identified.
+Residual risk is stated clearly.
+The output is short enough for leadership, but actionable enough for operations.
