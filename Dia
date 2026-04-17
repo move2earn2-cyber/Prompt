@@ -1,0 +1,19 @@
+flowchart TD
+    A[Start: Axios exploit assessment] --> B[Define scope and time window<br/>Threat: Axios npm compromise<br/>Pivots: axios, ZshBucket, STARDUST CHOLLIMA]
+    B --> C[Search Falcon Intel indicators<br/>Find related IOC values and labels]
+    C --> D[Search detections<br/>Match IOC values / threat labels / time window]
+    D --> E[Count total detections]
+    D --> F[Get detection details]
+    F --> G[Classify outcome<br/>Blocked / Prevented / Detected only]
+    G --> H[Count total blocks and preventions]
+    F --> I[Extract matched host IDs]
+    I --> J[Search behaviors on same hosts and timeframe]
+    J --> K[Get behavior details<br/>Validate process chain, command lines, connections]
+    I --> L[Get host details<br/>Hostname, OS, group, subnet, last seen]
+    L --> M[Optional: Search vulnerabilities on matched hosts]
+    E --> N[Final report]
+    H --> N
+    K --> N
+    L --> N
+    M --> N
+    N[Output:<br/>- Total detections<br/>- Total blocks/preventions<br/>- Host count<br/>- Affected hostnames<br/>- First seen / last seen<br/>- Repeated activity<br/>- Remaining exposure]
